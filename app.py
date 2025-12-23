@@ -10,6 +10,11 @@ import requests
 import streamlit as st
 import pandas as pd
 
+# -------------------------------------------------
+# Page config (should be near the top)
+# -------------------------------------------------
+st.set_page_config(page_title="Bulk Image Generator", layout="wide")
+
 # Hidden API URL (not shown in the UI)
 API_URL_DEFAULT = "https://yousmind.com/api/image-generator/generate"
 FILENAME_SAFE = re.compile(r"[^a-zA-Z0-9_\-]+")
@@ -62,11 +67,24 @@ def build_zip(files: List[Tuple[str, bytes]]) -> bytes:
     return buf.getvalue()
 
 
-# --------------- STREAMLIT UI ---------------
+# -------------------------------------------------
+# Session state initialization
+# -------------------------------------------------
+if "images" not in st.session_state:
+    # List of (name: str, data: bytes)
+    st.session_state["images"] = []
 
-st.set_page_config(page_title="Bulk Image Generator", layout="wide")
+if "failures" not in st.session_state:
+    st.session_state["failures"] = []
+
+if "last_summary" not in st.session_state:
+    st.session_state["last_summary"] = ""
+
+
+# -------------------------------------------------
+# UI
+# -------------------------------------------------
 st.title("Bulk Image Generator")
-
 
 with st.sidebar:
     st.header("API Settings")
@@ -83,7 +101,7 @@ with st.sidebar:
         api_key = st.text_input(
             "API Key",
             type="password",
-            help="Your API key. On Streamlit Cloud, store it in Secrets as YOUSMIND_API_KEY.",
+            help="Store your key in Streamlit Secrets for production use.",
         )
 
     st.header("Generation Settings")
@@ -156,6 +174,9 @@ run = st.button(
     disabled=not bool(api_key),
 )
 
+# -------------------------------------------------
+# Generation logic (only when button clicked)
+# -------------------------------------------------
 if run:
     prompts: List[str] = []
 
@@ -266,35 +287,88 @@ if run:
 
     elapsed = time.time() - start
 
+    # Save results in session_state so they persist across reruns (e.g. download button click)
+    st.session_state["images"] = all_files
+    st.session_state["failures"] = failures
+    st.session_state["last_summary"] = (
+        f"Generated {len(all_files)} images from {len(prompts)} prompts in {elapsed:.1f}s. "
+        f"Failures: {len(failures)}"
+    )
+
     if all_files:
-        st.success(
-            f"Done! {len(all_files)} images generated from {len(prompts)} prompts "
-            f"in {elapsed:.1f}s. Failures: {len(failures)}"
-        )
+        st.success(st.session_state["last_summary"])
     else:
         st.error(
             "No images were downloaded. All downloads failed.\n\n"
             "Scroll down to 'Failures (error details)' and look at the first error."
         )
 
-    if failures:
-        st.subheader("Failures (error details)")
-        for f in failures[:100]:
-            st.code(f)
+# -------------------------------------------------
+# Show last summary (persistent)
+# -------------------------------------------------
+if st.session_state["last_summary"]:
+    st.info(f"Last run: {st.session_state['last_summary']}")
 
-    # Preview after generation
-    if all_files:
-        st.subheader("Preview (first few images)")
-        preview = all_files[:12]
-        cols = st.columns(4)
-        for i, (name, data) in enumerate(preview):
-            with cols[i % 4]:
-                st.image(data, caption=name, use_container_width=True)
+# -------------------------------------------------
+# Show failures from session state
+# -------------------------------------------------
+if st.session_state["failures"]:
+    st.subheader("Failures (error details)")
+    for f in st.session_state["failures"][:100]:
+        st.code(f)
 
-        zip_bytes = build_zip(all_files)
+# -------------------------------------------------
+# Preview + selection + single download button
+# -------------------------------------------------
+images = st.session_state["images"]
+
+if images:
+    st.subheader("Generated images")
+    st.caption("Select the images you want in the ZIP, then click Download.")
+
+    # Default selection: all True on first load
+    for idx, (name, data) in enumerate(images):
+        key = f"select_{idx}"
+        if key not in st.session_state:
+            st.session_state[key] = True  # default checked
+
+    # Grid preview with checkboxes
+    cols = st.columns(3)
+    for idx, (name, data) in enumerate(images):
+        col = cols[idx % 3]
+        with col:
+            st.image(data, caption=name, use_container_width=True)
+            st.checkbox("Select", key=f"select_{idx}")
+
+    # Build list of selected files
+    selected_files: List[Tuple[str, bytes]] = []
+    for idx, (name, data) in enumerate(images):
+        if st.session_state.get(f"select_{idx}", False):
+            selected_files.append((name, data))
+
+    st.divider()
+
+    # Single download button: behaves based on selection
+    if selected_files:
+        zip_bytes = build_zip(selected_files)
         st.download_button(
-            "Download all images as ZIP",
+            "Download as ZIP",
             data=zip_bytes,
             file_name="images.zip",
             mime="application/zip",
         )
+    else:
+        st.warning("Select at least one image to enable download.")
+
+    # Optional: clear button
+    if st.button("Clear images"):
+        old_images = list(images)  # copy length first
+        st.session_state["images"] = []
+        st.session_state["failures"] = []
+        st.session_state["last_summary"] = ""
+        # Clear selection flags
+        for idx in range(len(old_images)):
+            key = f"select_{idx}"
+            if key in st.session_state:
+                del st.session_state[key]
+        st.experimental_rerun()
