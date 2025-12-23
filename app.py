@@ -1,6 +1,5 @@
 import io
 import re
-import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Tuple
@@ -11,7 +10,7 @@ import streamlit as st
 import pandas as pd
 
 # -------------------------------------------------
-# Page config (should be near the top)
+# Page config (must be at the top)
 # -------------------------------------------------
 st.set_page_config(page_title="Bulk Image Generator", layout="wide")
 
@@ -71,7 +70,7 @@ def build_zip(files: List[Tuple[str, bytes]]) -> bytes:
 # Session state initialization
 # -------------------------------------------------
 if "images" not in st.session_state:
-    # List of (name: str, data: bytes)
+    # Each item: {"name": str, "data": bytes, "prompt": str}
     st.session_state["images"] = []
 
 if "failures" not in st.session_state:
@@ -87,21 +86,18 @@ if "last_summary" not in st.session_state:
 st.title("Bulk Image Generator")
 
 with st.sidebar:
-    st.header("API Settings")
-
-    # 1) Try to read the key from Streamlit secrets (for Streamlit Cloud)
+    # API key from secrets or manual input
     api_key = None
     try:
         api_key = st.secrets.get("YOUSMIND_API_KEY", None)
     except Exception:
         api_key = None
 
-    # 2) If there is no secret configured, fall back to manual input
     if not api_key:
         api_key = st.text_input(
             "API Key",
             type="password",
-            help="Store your key in Streamlit Secrets for production use.",
+            help="Store this in Streamlit Secrets as YOUSMIND_API_KEY for production use.",
         )
 
     st.header("Generation Settings")
@@ -206,7 +202,7 @@ if run:
 
     st.info(f"{len(prompts)} prompts queued.")
 
-    def worker(idx: int, prompt: str) -> List[Tuple[str, bytes]]:
+    def worker(idx: int, prompt: str):
         headers = {
             "Content-Type": "application/json",
             "X-API-Key": api_key,
@@ -218,7 +214,7 @@ if run:
             "n": n_images,
         }
 
-        # Use the hidden API URL constant
+        # Use hidden API URL
         r = requests.post(API_URL_DEFAULT, headers=headers, json=payload, timeout=timeout)
 
         try:
@@ -248,21 +244,22 @@ if run:
                 full_url = urljoin(API_URL_DEFAULT, url)
             fixed_urls.append(full_url)
 
-        files: List[Tuple[str, bytes]] = []
+        files = []
         for k, full_url in enumerate(fixed_urls, start=1):
             ext, raw = download_image(full_url, timeout=timeout)
             name = f"{idx:03d}_{safe_name(prompt)}_{k}.{ext}"
-            files.append((name, raw))
+            files.append({"name": name, "data": raw, "prompt": prompt})
 
         return files
 
     progress = st.progress(0)
     status = st.empty()
 
-    all_files: List[Tuple[str, bytes]] = []
+    images_list = []
     failures: List[str] = []
 
-    start = time.time()
+    import time as _time
+    start = _time.time()
     total = len(prompts)
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -273,35 +270,26 @@ if run:
 
         done = 0
         for fut in as_completed(futures):
-            idx, prompt = futures[fut]
+            idx, prompt_value = futures[fut]
             try:
                 files = fut.result()
-                all_files.extend(files)
+                images_list.extend(files)
             except Exception as e:
-                failures.append(f"Prompt #{idx}: {prompt[:80]}... | Error: {e}")
+                failures.append(f"Prompt #{idx}: {prompt_value[:80]}... | Error: {e}")
             done += 1
             progress.progress(done / total)
             status.write(
-                f"Completed: {done}/{total} prompts | Images: {len(all_files)} | Failed: {len(failures)}"
+                f"Completed: {done}/{total} prompts | Images: {len(images_list)} | Failed: {len(failures)}"
             )
 
-    elapsed = time.time() - start
+    elapsed = _time.time() - start
 
-    # Save results in session_state so they persist across reruns (e.g. download button click)
-    st.session_state["images"] = all_files
+    st.session_state["images"] = images_list
     st.session_state["failures"] = failures
     st.session_state["last_summary"] = (
-        f"Generated {len(all_files)} images from {len(prompts)} prompts in {elapsed:.1f}s. "
+        f"Generated {len(images_list)} images from {len(prompts)} prompts in {elapsed:.1f}s. "
         f"Failures: {len(failures)}"
     )
-
-    if all_files:
-        st.success(st.session_state["last_summary"])
-    else:
-        st.error(
-            "No images were downloaded. All downloads failed.\n\n"
-            "Scroll down to 'Failures (error details)' and look at the first error."
-        )
 
 # -------------------------------------------------
 # Show last summary (persistent)
@@ -318,37 +306,113 @@ if st.session_state["failures"]:
         st.code(f)
 
 # -------------------------------------------------
-# Preview + selection + single download button
+# Preview + per-image select + edit+regen + single download button
 # -------------------------------------------------
 images = st.session_state["images"]
 
 if images:
     st.subheader("Generated images")
-    st.caption("Select the images you want in the ZIP, then click Download.")
+    st.caption("Select images you want in the ZIP, then click Download.")
 
-    # Default selection: all True on first load
-    for idx, (name, data) in enumerate(images):
-        key = f"select_{idx}"
-        if key not in st.session_state:
-            st.session_state[key] = True  # default checked
+    # "Select all" button – sets all checkboxes to True
+    if st.button("Select all"):
+        for idx in range(len(images)):
+            st.session_state[f"select_{idx}"] = True
 
-    # Grid preview with checkboxes
     cols = st.columns(3)
-    for idx, (name, data) in enumerate(images):
-        col = cols[idx % 3]
-        with col:
-            st.image(data, caption=name, use_container_width=True)
-            st.checkbox("Select", key=f"select_{idx}")
 
-    # Build list of selected files
+    for idx, img in enumerate(images):
+        key_select = f"select_{idx}"
+        key_edit_mode = f"edit_mode_{idx}"
+        key_prompt_edit = f"prompt_edit_{idx}"
+        key_edit_btn = f"edit_btn_{idx}"
+        key_regen = f"regen_{idx}"
+
+        # Default edit mode: False
+        if key_edit_mode not in st.session_state:
+            st.session_state[key_edit_mode] = False
+
+        with cols[idx % 3]:
+            # Image preview
+            st.image(img["data"], caption=img["name"], use_container_width=True)
+
+            # Always show current prompt (short preview)
+            st.caption(f"Current prompt: {img.get('prompt', '')[:80]}")
+
+            # Selection checkbox (default False until user / Select all changes it)
+            st.checkbox("Select", key=key_select)
+
+            # Row: Edit prompt button + Regenerate button (always visible)
+            col_btn1, col_btn2 = st.columns(2)
+            with col_btn1:
+                if st.button("Edit prompt", key=key_edit_btn):
+                    # Toggle edit mode; when turning on, seed the editable prompt
+                    st.session_state[key_edit_mode] = not st.session_state[key_edit_mode]
+                    if st.session_state[key_edit_mode]:
+                        st.session_state[key_prompt_edit] = img.get("prompt", "")
+                    st.experimental_rerun()
+            with col_btn2:
+                # Regenerate button always visible
+                regen = st.button("Regenerate", key=key_regen)
+
+            # If edit mode is on, show text area for this image
+            if st.session_state[key_edit_mode]:
+                st.text_area(
+                    "Edit prompt for this image",
+                    key=key_prompt_edit,
+                )
+
+            # Handle regeneration logic
+            if regen:
+                # If in edit mode and we have an edited prompt, use that; otherwise use original prompt
+                if st.session_state.get(key_edit_mode, False) and key_prompt_edit in st.session_state:
+                    prompt_to_use = st.session_state[key_prompt_edit]
+                else:
+                    prompt_to_use = img.get("prompt", "")
+
+                headers = {
+                    "Content-Type": "application/json",
+                    "X-API-Key": api_key,
+                }
+                payload = {
+                    "prompt": prompt_to_use,
+                    "aspect_ratio": aspect_ratio,
+                    "provider": provider,
+                    "n": 1,  # regenerate a single image for this slot
+                }
+                r = requests.post(API_URL_DEFAULT, headers=headers, json=payload, timeout=timeout)
+                try:
+                    data = r.json()
+                except Exception:
+                    data = {"raw_text": r.text}
+
+                if r.status_code != 200:
+                    st.error(f"Regenerate failed: HTTP {r.status_code} | {str(data)[:200]}")
+                else:
+                    urls = data.get("image_urls", [])
+                    if not urls:
+                        st.error(f"Regenerate failed: no image_urls in response: {str(data)[:200]}")
+                    else:
+                        url = urls[0]
+                        if not url.lower().startswith("http"):
+                            url = urljoin(API_URL_DEFAULT, url)
+                        ext, raw = download_image(url, timeout=timeout)
+                        # Update this image in-place
+                        img["data"] = raw
+                        img["name"] = f"regen_{idx:03d}_{safe_name(prompt_to_use)}.{ext}"
+                        img["prompt"] = prompt_to_use
+                        st.session_state["images"][idx] = img
+                        st.experimental_rerun()
+
+    # Build list of selected files for download
     selected_files: List[Tuple[str, bytes]] = []
-    for idx, (name, data) in enumerate(images):
+    for idx, img in enumerate(images):
         if st.session_state.get(f"select_{idx}", False):
-            selected_files.append((name, data))
+            selected_files.append((img["name"], img["data"]))
 
     st.divider()
 
-    # Single download button: behaves based on selection
+    # Single download button – uses selection
     if selected_files:
         zip_bytes = build_zip(selected_files)
         st.download_button(
@@ -360,15 +424,16 @@ if images:
     else:
         st.warning("Select at least one image to enable download.")
 
-    # Optional: clear button
+    # Optional clear button
     if st.button("Clear images"):
-        old_images = list(images)  # copy length first
+        old_len = len(images)
         st.session_state["images"] = []
         st.session_state["failures"] = []
         st.session_state["last_summary"] = ""
-        # Clear selection flags
-        for idx in range(len(old_images)):
-            key = f"select_{idx}"
-            if key in st.session_state:
-                del st.session_state[key]
+        # Clear per-image states
+        for idx in range(old_len):
+            for prefix in ("select_", "prompt_edit_", "edit_mode_", "edit_btn_", "regen_"):
+                key = f"{prefix}{idx}"
+                if key in st.session_state:
+                    del st.session_state[key]
         st.experimental_rerun()
