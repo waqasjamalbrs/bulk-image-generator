@@ -3,7 +3,7 @@ import re
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 import requests
 import streamlit as st
@@ -14,39 +14,47 @@ FILENAME_SAFE = re.compile(r"[^a-zA-Z0-9_\-]+")
 
 
 def safe_name(s: str, max_len: int = 60) -> str:
+    """Convert a prompt into a safe file name."""
     s = s.strip().replace(" ", "_")
     s = FILENAME_SAFE.sub("", s)
     return (s[:max_len] or "prompt").strip("_")
 
 
-def download_image(url: str, timeout: int = 60) -> Optional[Tuple[str, bytes]]:
+def download_image(url: str, timeout: int = 60) -> Tuple[str, bytes]:
+    """
+    Download an image from a URL.
+    If anything goes wrong, raise an error with the exact reason.
+    """
     try:
         r = requests.get(url, timeout=timeout)
         r.raise_for_status()
+    except Exception as e:
+        # This message will appear in the Failures section
+        raise RuntimeError(f"Download failed for URL: {url} | Reason: {e}")
 
-        ext = "png"
-        lower = url.lower()
-        if ".jpg" in lower or ".jpeg" in lower:
+    # Guess file extension from URL, fall back to content-type
+    ext = "png"
+    lower = url.lower()
+    if ".jpg" in lower or ".jpeg" in lower:
+        ext = "jpg"
+    elif ".gif" in lower:
+        ext = "gif"
+    elif ".webp" in lower:
+        ext = "webp"
+    else:
+        ct = (r.headers.get("content-type") or "").lower()
+        if "jpeg" in ct or "jpg" in ct:
             ext = "jpg"
-        elif ".gif" in lower:
+        elif "gif" in ct:
             ext = "gif"
-        elif ".webp" in lower:
+        elif "webp" in ct:
             ext = "webp"
-        else:
-            ct = (r.headers.get("content-type") or "").lower()
-            if "jpeg" in ct or "jpg" in ct:
-                ext = "jpg"
-            elif "gif" in ct:
-                ext = "gif"
-            elif "webp" in ct:
-                ext = "webp"
 
-        return ext, r.content
-    except Exception:
-        return None
+    return ext, r.content
 
 
 def build_zip(files: List[Tuple[str, bytes]]) -> bytes:
+    """Create a ZIP file in memory from (filename, data) pairs."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for name, data in files:
@@ -63,19 +71,19 @@ st.title("Yousmind Bulk Image Generator")
 with st.sidebar:
     st.header("API Settings")
 
-    # 1) Streamlit Secrets se key lene ki koshish (Streamlit Cloud / local .streamlit/secrets.toml)
+    # 1) Try to read the key from Streamlit secrets (for Streamlit Cloud)
     api_key = None
     try:
         api_key = st.secrets.get("YOUSMIND_API_KEY", None)
     except Exception:
         api_key = None
 
-    # 2) Agar secrets me nahi hai to user se manga jayega
+    # 2) If there is no secret configured, fall back to manual input
     if not api_key:
         api_key = st.text_input(
             "X-API-Key",
             type="password",
-            help="Yousmind API key. Streamlit Cloud me Secrets me YOUSMIND_API_KEY ke naam se save karein.",
+            help="Your Yousmind API key. On Streamlit Cloud, store it in Secrets as YOUSMIND_API_KEY.",
         )
 
     api_url = st.text_input("API URL", value=API_URL_DEFAULT)
@@ -86,31 +94,31 @@ with st.sidebar:
         "Provider",
         ["1.5-Fast", "1.0-Slow"],
         index=0,
-        help="Docs ke mutabiq supported providers.",
+        help="Supported providers from the Yousmind docs.",
     )
 
     aspect_ratio = st.selectbox(
         "Aspect ratio (image size)",
         ["16:9", "9:16", "1:1"],
         index=0,
-        help='Docs: "16:9", "9:16", "1:1" supported.',
+        help='Supported values: "16:9", "9:16", "1:1".',
     )
 
     n_images = st.selectbox(
         "Images per prompt (n)",
         [1, 2, 3, 4],
         index=0,
-        help="Docs: n ∈ {1,2,3,4}",
+        help="The number of images to generate for each prompt.",
     )
 
-    timeout = st.slider("Request timeout (sec)", 10, 180, 60)
+    timeout = st.slider("Request timeout (seconds)", 10, 180, 60)
 
     max_workers = st.slider(
         "Parallel requests",
         1,
         10,
         4,
-        help="Zyada parallel = tez, lekin rate-limit ka risk.",
+        help="More parallel requests = faster, but higher chance of hitting rate limits.",
     )
 
 st.subheader("Prompts input")
@@ -122,17 +130,17 @@ with col1:
         "One prompt per line",
         height=220,
         placeholder=(
-            "Har line pe ek prompt likhein.\n"
-            "e.g.\n"
+            "Write one prompt per line.\n"
+            "Example:\n"
             "A majestic lion with a crown of stars, deep space background, cinematic lighting\n"
             "A futuristic city skyline at night, synthwave style"
         ),
     )
-    st.caption("Khali lines ignore ho jayengi.")
+    st.caption("Empty lines are ignored.")
 
 with col2:
     uploaded = st.file_uploader(
-        "Ya CSV upload karein (column name: prompt)", type=["csv"]
+        "Or upload a CSV (column name: prompt)", type=["csv"]
     )
     df = None
     if uploaded is not None:
@@ -153,15 +161,18 @@ run = st.button(
 if run:
     prompts: List[str] = []
 
+    # From CSV
     if df is not None and "prompt" in df.columns:
         prompts.extend([str(x) for x in df["prompt"].dropna().tolist()])
 
+    # From textarea
     if prompts_text.strip():
         for line in prompts_text.splitlines():
             line = line.strip()
             if line:
                 prompts.append(line)
 
+    # Remove duplicates while keeping order
     seen = set()
     unique_prompts: List[str] = []
     for p in prompts:
@@ -171,10 +182,10 @@ if run:
     prompts = unique_prompts
 
     if not prompts:
-        st.error("Koi prompt nahi mila. Text area ya CSV me 'prompt' column zaroor bharain.")
+        st.error("No prompts found. Add lines in the text area or a CSV with a 'prompt' column.")
         st.stop()
 
-    st.info(f"{len(prompts)} prompts queue ho gaye.")
+    st.info(f"{len(prompts)} prompts queued.")
 
     def worker(idx: int, prompt: str) -> List[Tuple[str, bytes]]:
         headers = {
@@ -208,19 +219,18 @@ if run:
                 f"Response: {str(data)[:400]}"
             )
 
+        # For debugging: show URLs for the first prompt
+        if idx == 1:
+            st.write("Debug: image_urls for the first prompt:")
+            for u in urls:
+                st.write(u)
+
         files: List[Tuple[str, bytes]] = []
         for k, url in enumerate(urls, start=1):
-            dl = download_image(url, timeout=timeout)
-            if not dl:
-                continue
-            ext, raw = dl
+            # If something goes wrong here, the error will include the URL and reason
+            ext, raw = download_image(url, timeout=timeout)
             name = f"{idx:03d}_{safe_name(prompt)}_{k}.{ext}"
             files.append((name, raw))
-
-        if not files:
-            raise RuntimeError(
-                f"image_urls mili lekin download fail ho gaya for prompt #{idx}: {prompt[:80]}..."
-            )
 
         return files
 
@@ -262,7 +272,9 @@ if run:
         )
     else:
         st.error(
-            f"Koi image download nahi hui. Failures: {len(failures)}. Neeche error details dekhein."
+            "No images were downloaded. All downloads failed.\n\n"
+            "Scroll down to 'Failures (error details)' and look at the first error. "
+            "It will show the exact URL and the reason (timeout, SSL error, blocked, etc.)."
         )
 
     if failures:
@@ -271,7 +283,7 @@ if run:
             st.code(f)
 
     if all_files:
-        st.subheader("Preview (pehli kuch images)")
+        st.subheader("Preview (first few images)")
         preview = all_files[:12]
         cols = st.columns(4)
         for i, (name, data) in enumerate(preview):
