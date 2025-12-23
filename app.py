@@ -4,11 +4,13 @@ import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Tuple
+from urllib.parse import urljoin
 
 import requests
 import streamlit as st
 import pandas as pd
 
+# Hidden API URL (not shown in the UI)
 API_URL_DEFAULT = "https://yousmind.com/api/image-generator/generate"
 FILENAME_SAFE = re.compile(r"[^a-zA-Z0-9_\-]+")
 
@@ -29,10 +31,8 @@ def download_image(url: str, timeout: int = 60) -> Tuple[str, bytes]:
         r = requests.get(url, timeout=timeout)
         r.raise_for_status()
     except Exception as e:
-        # This message will appear in the Failures section
         raise RuntimeError(f"Download failed for URL: {url} | Reason: {e}")
 
-    # Guess file extension from URL, fall back to content-type
     ext = "png"
     lower = url.lower()
     if ".jpg" in lower or ".jpeg" in lower:
@@ -64,8 +64,8 @@ def build_zip(files: List[Tuple[str, bytes]]) -> bytes:
 
 # --------------- STREAMLIT UI ---------------
 
-st.set_page_config(page_title="Yousmind Bulk Image Generator", layout="wide")
-st.title("Yousmind Bulk Image Generator")
+st.set_page_config(page_title="Bulk Image Generator", layout="wide")
+st.title("Bulk Image Generator")
 
 
 with st.sidebar:
@@ -81,12 +81,10 @@ with st.sidebar:
     # 2) If there is no secret configured, fall back to manual input
     if not api_key:
         api_key = st.text_input(
-            "X-API-Key",
+            "API Key",
             type="password",
-            help="Your Yousmind API key. On Streamlit Cloud, store it in Secrets as YOUSMIND_API_KEY.",
+            help="Your API key. On Streamlit Cloud, store it in Secrets as YOUSMIND_API_KEY.",
         )
-
-    api_url = st.text_input("API URL", value=API_URL_DEFAULT)
 
     st.header("Generation Settings")
 
@@ -94,21 +92,21 @@ with st.sidebar:
         "Provider",
         ["1.5-Fast", "1.0-Slow"],
         index=0,
-        help="Supported providers from the Yousmind docs.",
+        help="Choose which engine to use.",
     )
 
     aspect_ratio = st.selectbox(
         "Aspect ratio (image size)",
         ["16:9", "9:16", "1:1"],
         index=0,
-        help='Supported values: "16:9", "9:16", "1:1".',
+        help="Select the output aspect ratio.",
     )
 
     n_images = st.selectbox(
         "Images per prompt (n)",
         [1, 2, 3, 4],
         index=0,
-        help="The number of images to generate for each prompt.",
+        help="How many images to generate for each prompt.",
     )
 
     timeout = st.slider("Request timeout (seconds)", 10, 180, 60)
@@ -199,7 +197,8 @@ if run:
             "n": n_images,
         }
 
-        r = requests.post(api_url, headers=headers, json=payload, timeout=timeout)
+        # Use the hidden API URL constant
+        r = requests.post(API_URL_DEFAULT, headers=headers, json=payload, timeout=timeout)
 
         try:
             data = r.json()
@@ -219,16 +218,18 @@ if run:
                 f"Response: {str(data)[:400]}"
             )
 
-        # For debugging: show URLs for the first prompt
-        if idx == 1:
-            st.write("Debug: image_urls for the first prompt:")
-            for u in urls:
-                st.write(u)
+        # Fix relative URLs (e.g. "/generated_images/xyz.png")
+        fixed_urls = []
+        for url in urls:
+            if url.lower().startswith("http"):
+                full_url = url
+            else:
+                full_url = urljoin(API_URL_DEFAULT, url)
+            fixed_urls.append(full_url)
 
         files: List[Tuple[str, bytes]] = []
-        for k, url in enumerate(urls, start=1):
-            # If something goes wrong here, the error will include the URL and reason
-            ext, raw = download_image(url, timeout=timeout)
+        for k, full_url in enumerate(fixed_urls, start=1):
+            ext, raw = download_image(full_url, timeout=timeout)
             name = f"{idx:03d}_{safe_name(prompt)}_{k}.{ext}"
             files.append((name, raw))
 
@@ -273,8 +274,7 @@ if run:
     else:
         st.error(
             "No images were downloaded. All downloads failed.\n\n"
-            "Scroll down to 'Failures (error details)' and look at the first error. "
-            "It will show the exact URL and the reason (timeout, SSL error, blocked, etc.)."
+            "Scroll down to 'Failures (error details)' and look at the first error."
         )
 
     if failures:
@@ -282,6 +282,7 @@ if run:
         for f in failures[:100]:
             st.code(f)
 
+    # Preview after generation
     if all_files:
         st.subheader("Preview (first few images)")
         preview = all_files[:12]
@@ -294,6 +295,6 @@ if run:
         st.download_button(
             "Download all images as ZIP",
             data=zip_bytes,
-            file_name="yousmind_images.zip",
+            file_name="images.zip",
             mime="application/zip",
         )
