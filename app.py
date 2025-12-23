@@ -314,10 +314,16 @@ if images:
     st.subheader("Generated images")
     st.caption("Select images you want in the ZIP, then click Download.")
 
-    # "Select all" button – sets all checkboxes to True
-    if st.button("Select all"):
-        for idx in range(len(images)):
-            st.session_state[f"select_{idx}"] = True
+    # Select all / Unselect all row
+    sel_col1, sel_col2 = st.columns(2)
+    with sel_col1:
+        if st.button("Select all"):
+            for idx in range(len(images)):
+                st.session_state[f"select_{idx}"] = True
+    with sel_col2:
+        if st.button("Unselect all"):
+            for idx in range(len(images)):
+                st.session_state[f"select_{idx}"] = False
 
     cols = st.columns(3)
 
@@ -336,13 +342,13 @@ if images:
             # Image preview
             st.image(img["data"], caption=img["name"], use_container_width=True)
 
-            # Always show current prompt (short preview)
+            # Show current prompt short preview
             st.caption(f"Current prompt: {img.get('prompt', '')[:80]}")
 
             # Selection checkbox (default False until user / Select all changes it)
             st.checkbox("Select", key=key_select)
 
-            # Row: Edit prompt button + Regenerate button (always visible)
+            # Row: Edit prompt + Regenerate (always visible)
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
                 if st.button("Edit prompt", key=key_edit_btn):
@@ -350,9 +356,8 @@ if images:
                     st.session_state[key_edit_mode] = not st.session_state[key_edit_mode]
                     if st.session_state[key_edit_mode]:
                         st.session_state[key_prompt_edit] = img.get("prompt", "")
-                    st.experimental_rerun()
+                    st.rerun()
             with col_btn2:
-                # Regenerate button always visible
                 regen = st.button("Regenerate", key=key_regen)
 
             # If edit mode is on, show text area for this image
@@ -402,7 +407,7 @@ if images:
                         img["name"] = f"regen_{idx:03d}_{safe_name(prompt_to_use)}.{ext}"
                         img["prompt"] = prompt_to_use
                         st.session_state["images"][idx] = img
-                        st.experimental_rerun()
+                        st.rerun()
 
     # Build list of selected files for download
     selected_files: List[Tuple[str, bytes]] = []
@@ -436,4 +441,4 @@ if images:
                 key = f"{prefix}{idx}"
                 if key in st.session_state:
                     del st.session_state[key]
-        st.experimental_rerun()
+        st.rerun()
